@@ -1,11 +1,7 @@
 package libs.DAO;
 
-import libs.DAO.decorators.Column;
-import libs.DAO.decorators.DefaultPersist;
-import libs.DAO.decorators.Id;
-import libs.DAO.decorators.Table;
+import libs.DAO.decorators.*;
 import libs.DAO.exceptions.*;
-import libs.Logging.Logger;
 import org.springframework.dao.IncorrectResultSizeDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -13,12 +9,15 @@ import org.springframework.jdbc.core.simple.SimpleJdbcInsert;
 
 import java.io.InvalidClassException;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.logging.Logger;
 
 public class DAO {
     protected final JdbcTemplate jdbcTemplate;
@@ -83,6 +82,7 @@ public class DAO {
     private Map<String, ?> createParameters(Object object) throws InvalidColumnNameException, IllegalAccessException {
         Map<String, Object> result = new HashMap<>();
         for(Field field: object.getClass().getDeclaredFields()){
+            if(field.getAnnotation(IgnoreColumn.class)!=null) continue;
             if(field.getAnnotation(DefaultPersist.class)!=null && field.get(object) == null) continue;
             Column column = field.getAnnotation(Column.class);
             Id id = field.getAnnotation(Id.class);
@@ -109,7 +109,7 @@ public class DAO {
         @Override
         public T mapRow(ResultSet rs, int rowNum) throws SQLException {
             try {
-                T result = tClass.newInstance();
+                T result = tClass.getDeclaredConstructor().newInstance();
                 for(Field field: tClass.getDeclaredFields()){
                     Column column = field.getAnnotation(Column.class);
                     if(column == null || column.name().isEmpty()) continue;
@@ -120,11 +120,22 @@ public class DAO {
                         if(value != null)
                             value = field.getType().getEnumConstants()[(int)value];
                     }
+                    Method method = findSetter(field);
+                    if(method!=null){
+                        try {
+                            method.setAccessible(true);
+                            method.invoke(result, value);
+                            continue;
+                        } catch (InvocationTargetException e) {
+                            Logger.getGlobal().warning("Can't use "+method.getName()+" setter on object "+tClass+", trying to assign value to field");
+                        }
+                    }
+                    field.setAccessible(true);
                     field.set(result, value);
                 }
                 return result;
-            } catch (InstantiationException | IllegalAccessException e) {
-                Logger.logException("While trying to map query result to object", e, true);
+            } catch (InstantiationException | IllegalAccessException | InvocationTargetException | NoSuchMethodException e) {
+                Logger.getGlobal().warning("While trying to map query result to object, got exception: "+e.getMessage());
                 return null;
             }
         }
@@ -151,6 +162,14 @@ public class DAO {
             IncorrectResultSizeDataAccessException exception){
 //            Logger.logException("While retrieving data for query: "+sql+" got null", exception, false);
             return Optional.empty();
+        }
+    }
+
+    private static Method findSetter(Field field) {
+        try {
+            return field.getDeclaringClass().getDeclaredMethod("set" + Character.toUpperCase(field.getName().charAt(0)) + field.getName().substring(1), field.getType());
+        }catch (NoSuchMethodException e){
+            return null;
         }
     }
 }
